@@ -230,13 +230,14 @@ static void executeAction(const char* command, uint32_t successColor) {
 
 void setup() {
   Serial.begin(115200);
-  blinkLed(COLOR_BLUE, BLINK_COUNT);
   delay(200);
 
   M5.begin(true, false, true); // Serial, I2C, LED
   pinMode(PIN_BTN, INPUT);
 
   Serial.println("Ready.");
+  setLed(COLOR_BLUE);
+  delay(400);
   setLed(COLOR_OFF);
   setIdleClock();
 }
