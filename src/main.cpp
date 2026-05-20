@@ -28,6 +28,10 @@ static const bool BUTTON_ACTIVE_LOW = true;
 static const uint32_t LONG_PRESS_MS = 2000;
 static const uint32_t COOLDOWN_MS = 5000;
 
+// Clock frequencies
+static const int CPU_FREQ_ACTIVE = 240;
+static const int CPU_FREQ_IDLE = 10;
+
 // LED colors (GRB order for M5Atom)
 static const uint32_t COLOR_OFF      = 0x000000;
 static const uint32_t COLOR_GREEN    = 0x00FF00;  // Lock success blink
@@ -37,8 +41,8 @@ static const uint32_t COLOR_YELLOW   = 0xFFFF00;  // API error
 static const uint32_t COLOR_PURPLE   = 0xFF00FF;  // Sending command
 
 static const int BLINK_COUNT = 3;
-static const uint32_t BLINK_ON_MS = 200;
-static const uint32_t BLINK_OFF_MS = 200;
+static const uint32_t BLINK_ON_MS = 400;
+static const uint32_t BLINK_OFF_MS = 400;
 
 // ======= State =======
 static uint32_t last_action_ms = 0;
@@ -46,7 +50,6 @@ static uint32_t btn_down_ms = 0;
 static bool btn_was_pressed = false;
 
 static uint32_t error_until_ms = 0;
-static bool has_valid_time = false;
 
 static void setLed(uint32_t color) {
   uint8_t r = (color >> 16) & 0xFF;
@@ -64,15 +67,33 @@ static void blinkLed(uint32_t color, int count) {
   }
 }
 
+static bool connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("WiFi connecting");
+  for (int i = 0; i < 60; ++i) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println(" connected.");
+      return true;
+    }
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println(" failed.");
+  return false;
+}
+
+static void disconnectWiFi() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
 static bool waitForTimeSync() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   time_t now = 0;
   for (int i = 0; i < 30; ++i) {
     time(&now);
-    if (now > 1600000000) {
-      has_valid_time = true;
-      return true;
-    }
+    if (now > 1600000000) return true;
     delay(500);
   }
   return false;
@@ -112,17 +133,7 @@ static String hmacSha256Base64Upper(const String& payload, const char* secret) {
 }
 
 static bool sendCommand(const char* command) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected.");
-    return false;
-  }
-
   time_t now = time(nullptr);
-  if (now < 1600000000) {
-    Serial.println("Time not synced.");
-    return false;
-  }
-
   String nonce = makeUuidV4();
   uint64_t t_ms = static_cast<uint64_t>(now) * 1000ULL;
   String t = String(t_ms);
@@ -168,75 +179,83 @@ static bool isPressed() {
   return BUTTON_ACTIVE_LOW ? (v == LOW) : (v == HIGH);
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(200);
+static void setActiveClock() {
+  setCpuFrequencyMhz(CPU_FREQ_ACTIVE);
+  Serial.updateBaudRate(115200);
+  Serial.printf("CPU freq: %d MHz\n", getCpuFrequencyMhz());
+}
 
-  M5.begin(true, false, true); // Serial, I2C, LED
+static void setIdleClock() {
+  Serial.printf("CPU freq -> %d MHz\n", CPU_FREQ_IDLE);
+  Serial.flush();
+  setCpuFrequencyMhz(CPU_FREQ_IDLE);
+}
+
+static void executeAction(const char* command, uint32_t successColor) {
+  setActiveClock();
+
   setLed(COLOR_BLUE);
-
-  pinMode(PIN_BTN, INPUT);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("WiFi connecting");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
-    Serial.print(".");
+  if (!connectWiFi()) {
+    blinkLed(COLOR_YELLOW, BLINK_COUNT);
+    setIdleClock();
+    return;
   }
-  Serial.println("\nWiFi connected.");
 
-  if (waitForTimeSync()) {
-    Serial.println("Time sync done.");
+  Serial.print("NTP sync...");
+  if (!waitForTimeSync()) {
+    Serial.println(" failed.");
+    blinkLed(COLOR_YELLOW, BLINK_COUNT);
+    disconnectWiFi();
+    setIdleClock();
+    return;
+  }
+  Serial.println(" done.");
+
+  setLed(COLOR_PURPLE);
+  Serial.printf("%s command\n", command);
+  bool ok = sendCommand(command);
+
+  disconnectWiFi();
+
+  if (ok) {
+    blinkLed(successColor, BLINK_COUNT);
+    last_action_ms = millis();
   } else {
-    Serial.println("Time sync pending.");
+    blinkLed(COLOR_YELLOW, BLINK_COUNT);
   }
 
   setLed(COLOR_OFF);
+  setIdleClock();
+}
+
+void setup() {
+  Serial.begin(115200);
+  blinkLed(COLOR_BLUE, BLINK_COUNT);
+  delay(200);
+
+  M5.begin(true, false, true); // Serial, I2C, LED
+  pinMode(PIN_BTN, INPUT);
+
+  Serial.println("Ready.");
+  setLed(COLOR_OFF);
+  setIdleClock();
 }
 
 void loop() {
-  uint32_t now = millis();
-
-  if (error_until_ms && now >= error_until_ms) {
-    error_until_ms = 0;
-    setLed(COLOR_OFF);
-  }
-
   bool pressed = isPressed();
 
   if (pressed && !btn_was_pressed) {
-    btn_down_ms = now;
+    btn_down_ms = millis();
   }
 
   if (!pressed && btn_was_pressed) {
-    uint32_t held = now - btn_down_ms;
+    uint32_t held = millis() - btn_down_ms;
 
-    if (held >= LONG_PRESS_MS) {
-      // Long press: Lock
-      if (now - last_action_ms >= COOLDOWN_MS) {
-        Serial.println("Lock command");
-        setLed(COLOR_PURPLE);
-        if (sendCommand("lock")) {
-          blinkLed(COLOR_GREEN, BLINK_COUNT);
-          last_action_ms = millis();
-        } else {
-          error_until_ms = millis() + 3000;
-          setLed(COLOR_YELLOW);
-        }
-      }
-    } else {
-      // Short press: Unlock
-      if (now - last_action_ms >= COOLDOWN_MS) {
-        Serial.println("Unlock command");
-        setLed(COLOR_PURPLE);
-        if (sendCommand("unlock")) {
-          blinkLed(COLOR_RED, BLINK_COUNT);
-          last_action_ms = millis();
-        } else {
-          error_until_ms = millis() + 3000;
-          setLed(COLOR_YELLOW);
-        }
+    if (millis() - last_action_ms >= COOLDOWN_MS) {
+      if (held >= LONG_PRESS_MS) {
+        executeAction("lock", COLOR_GREEN);
+      } else {
+        executeAction("unlock", COLOR_RED);
       }
     }
     btn_down_ms = 0;
