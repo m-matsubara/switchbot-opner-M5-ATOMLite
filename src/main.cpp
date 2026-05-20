@@ -48,6 +48,7 @@ static const uint32_t BLINK_OFF_MS = 400;
 static uint32_t last_action_ms = 0;
 static uint32_t btn_down_ms = 0;
 static bool btn_was_pressed = false;
+static bool long_press_fired = false;
 
 static uint32_t error_until_ms = 0;
 
@@ -225,6 +226,7 @@ static void executeAction(const char* command, uint32_t successColor) {
   }
 
   setLed(COLOR_OFF);
+  delay(10);
   setIdleClock();
 }
 
@@ -239,6 +241,7 @@ void setup() {
   setLed(COLOR_BLUE);
   delay(400);
   setLed(COLOR_OFF);
+  delay(10);
   setIdleClock();
 }
 
@@ -247,17 +250,19 @@ void loop() {
 
   if (pressed && !btn_was_pressed) {
     btn_down_ms = millis();
+    long_press_fired = false;
+  }
+
+  if (pressed && !long_press_fired && (millis() - btn_down_ms >= LONG_PRESS_MS)) {
+    if (millis() - last_action_ms >= COOLDOWN_MS) {
+      executeAction("lock", COLOR_GREEN);
+    }
+    long_press_fired = true;
   }
 
   if (!pressed && btn_was_pressed) {
-    uint32_t held = millis() - btn_down_ms;
-
-    if (millis() - last_action_ms >= COOLDOWN_MS) {
-      if (held >= LONG_PRESS_MS) {
-        executeAction("lock", COLOR_GREEN);
-      } else {
-        executeAction("unlock", COLOR_RED);
-      }
+    if (!long_press_fired && (millis() - last_action_ms >= COOLDOWN_MS)) {
+      executeAction("unlock", COLOR_RED);
     }
     btn_down_ms = 0;
   }
